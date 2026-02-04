@@ -118,6 +118,8 @@ app.post('/api/payments/verify', async (req, res) => {
     const { roomCode, txSignature, playerWallet } = req.body;
     const room = rooms.get(roomCode.toUpperCase());
     if (!room) return res.status(404).json({ error: 'Not found' });
+    if (room.status === 'finished') return res.status(400).json({ error: 'Game finished' });
+    if (room.status === 'playing') return res.status(400).json({ error: 'Game already started' });
     if (processedTx.has(txSignature)) return res.status(400).json({ error: 'Already processed' });
     
     try {
@@ -133,10 +135,18 @@ app.post('/api/payments/verify', async (req, res) => {
         room.confirmedPayments++;
         processedTx.add(txSignature);
         
-        if (room.confirmedPayments >= 2) room.status = 'playing';
-        console.log('Payment verified:', roomCode, 'Player', player.id);
+        // Start game only if 2 players AND 2 payments
+        if (room.confirmedPayments >= 2 && room.players.length >= 2) {
+            room.status = 'playing';
+        }
+        console.log('Payment verified:', roomCode, 'Player', player.id, 'Total paid:', room.confirmedPayments);
         
-        res.json({ success: true, room: { ...room, walletAddress: WALLET_ADDRESS }, message: room.status === 'playing' ? 'Game starting!' : 'Waiting opponent' });
+        let msg = 'Payment confirmed!';
+        if (room.status === 'playing') msg = 'Game starting!';
+        else if (room.players.length < 2) msg = 'Waiting for opponent to join...';
+        else if (room.confirmedPayments < 2) msg = 'Waiting for opponent payment...';
+        
+        res.json({ success: true, room: { ...room, walletAddress: WALLET_ADDRESS }, message: msg });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
