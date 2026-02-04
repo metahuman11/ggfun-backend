@@ -57,6 +57,16 @@ app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', walletAddress: WALLET_ADDRESS, rooms: rooms.size });
 });
 
+// Blockhash proxy (browsers can't access Solana RPC directly due to CORS)
+app.get('/api/blockhash', async (req, res) => {
+    try {
+        const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('finalized');
+        res.json({ success: true, blockhash, lastValidBlockHeight });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // Create room
 app.post('/api/rooms', (req, res) => {
     const { entryFee, creatorName, creatorWallet } = req.body;
