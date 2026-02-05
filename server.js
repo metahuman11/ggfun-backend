@@ -322,6 +322,37 @@ app.get('/api/matches', (req, res) => {
     res.json({ success: true, matches: matchHistory.slice(0, 20) });
 });
 
+// Check token balance for a wallet
+app.get('/api/balance/:wallet', async (req, res) => {
+    const wallet = req.params.wallet;
+    if (!isValidWallet(wallet)) return res.status(400).json({ error: 'Invalid wallet' });
+    
+    try {
+        const ownerPubkey = new PublicKey(wallet);
+        const ata = await getAssociatedTokenAddress(TOKEN_MINT, ownerPubkey, false, TOKEN_2022_PROGRAM_ID);
+        
+        const balance = await connection.getTokenAccountBalance(ata);
+        const amount = parseFloat(balance.value.uiAmount) || 0;
+        
+        res.json({ 
+            success: true, 
+            balance: amount,
+            balanceRaw: balance.value.amount,
+            decimals: TOKEN_DECIMALS,
+            symbol: TOKEN_SYMBOL
+        });
+    } catch (e) {
+        // Account doesn't exist = 0 balance
+        res.json({ 
+            success: true, 
+            balance: 0,
+            balanceRaw: '0',
+            decimals: TOKEN_DECIMALS,
+            symbol: TOKEN_SYMBOL
+        });
+    }
+});
+
 // Check if player has active game (for reconnection)
 app.get('/api/my-game/:wallet', (req, res) => {
     const wallet = req.params.wallet;
