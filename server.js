@@ -26,14 +26,18 @@ const COMMISSION_RATE = 0.10;
 const GAME_TIME_MS = 10 * 60 * 1000; // 10 minutes per player
 
 const connection = new Connection(SOLANA_RPC, 'confirmed');
-let wallet = null, WALLET_ADDRESS = '';
+let wallet = null;
+// Use WALLET_ADDRESS env var directly, or derive from private key
+let WALLET_ADDRESS = process.env.WALLET_ADDRESS || '';
 
 if (WALLET_PRIVATE_KEY) {
     try {
         wallet = Keypair.fromSecretKey(bs58.decode(WALLET_PRIVATE_KEY));
         WALLET_ADDRESS = wallet.publicKey.toString();
-        console.log('✅ Wallet:', WALLET_ADDRESS);
+        console.log('✅ Wallet (from key):', WALLET_ADDRESS);
     } catch (e) { console.error('Wallet error:', e.message); }
+} else if (WALLET_ADDRESS) {
+    console.log('✅ Wallet (receive only):', WALLET_ADDRESS);
 }
 
 const rooms = new Map();
