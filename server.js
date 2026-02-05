@@ -242,6 +242,30 @@ app.post('/api/rooms/:code/emoji', (req, res) => {
     res.json({ success: true });
 });
 
+// List all active rooms
+app.get('/api/rooms', (req, res) => {
+    const activeRooms = [];
+    rooms.forEach((room, code) => {
+        activeRooms.push({
+            code: room.code,
+            status: room.status,
+            entryFeeUsd: room.entryFeeUsd,
+            tokenAmount: room.tokenAmount,
+            playerCount: room.players.length,
+            spectatorCount: room.spectators.length,
+            players: room.players.map(p => ({ name: p.name, color: p.color })),
+            currentTurn: room.currentTurn,
+            createdAt: room.createdAt || Date.now()
+        });
+    });
+    // Sort by status (playing first, then waiting)
+    activeRooms.sort((a, b) => {
+        const order = { playing: 0, waiting_payments: 1, waiting_players: 2, finished: 3 };
+        return (order[a.status] || 99) - (order[b.status] || 99);
+    });
+    res.json({ success: true, rooms: activeRooms });
+});
+
 app.get('/api/rooms/:code', (req, res) => {
     const room = rooms.get(req.params.code.toUpperCase());
     if (!room) return res.status(404).json({ error: 'Not found' });
