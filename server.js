@@ -143,6 +143,21 @@ app.get('/api/blockhash', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Check if an account (ATA) exists
+app.get('/api/check-ata', async (req, res) => {
+    try {
+        const { address } = req.query;
+        if (!address) return res.json({ exists: false });
+        
+        const pubkey = new PublicKey(address);
+        const accountInfo = await connection.getAccountInfo(pubkey);
+        res.json({ exists: accountInfo !== null, address });
+    } catch (e) {
+        console.error('ATA check error:', e.message);
+        res.json({ exists: false, error: e.message });
+    }
+});
+
 // Get current token price
 app.get('/api/price', async (req, res) => {
     const price = await getTokenPrice();
