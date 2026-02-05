@@ -703,9 +703,7 @@ app.post('/api/rooms/:code/chat', (req, res) => {
     // Initialize chat array if not exists
     if (!room.chat) room.chat = [];
     
-    // Rate limit chat (max 10 messages per minute per user)
-    const recentMsgs = room.chat.filter(m => m.wallet === wallet && m.time > Date.now() - 60000);
-    if (recentMsgs.length >= 10) return res.status(429).json({ error: 'Too many messages, slow down' });
+    // Rate limit removed per user request
     
     // Determine if player or spectator
     const player = room.players.find(p => p.wallet === wallet);
