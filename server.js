@@ -6,7 +6,7 @@
 const express = require('express');
 const cors = require('cors');
 const { Connection, PublicKey, Keypair, Transaction } = require('@solana/web3.js');
-const { getAssociatedTokenAddress, createTransferInstruction, TOKEN_PROGRAM_ID } = require('@solana/spl-token');
+const { getAssociatedTokenAddress, createTransferInstruction, TOKEN_2022_PROGRAM_ID } = require('@solana/spl-token');
 const bs58 = require('bs58');
 
 const app = express();
@@ -418,8 +418,9 @@ async function handlePayout(room) {
     
     try {
         const recipient = new PublicKey(winner.wallet);
-        const senderATA = await getAssociatedTokenAddress(TOKEN_MINT, wallet.publicKey);
-        const recipientATA = await getAssociatedTokenAddress(TOKEN_MINT, recipient);
+        // Use Token-2022 program for pump.fun tokens
+        const senderATA = await getAssociatedTokenAddress(TOKEN_MINT, wallet.publicKey, false, TOKEN_2022_PROGRAM_ID);
+        const recipientATA = await getAssociatedTokenAddress(TOKEN_MINT, recipient, false, TOKEN_2022_PROGRAM_ID);
         
         // Token amount in smallest units
         const amountInSmallestUnit = payoutTokens * Math.pow(10, TOKEN_DECIMALS);
@@ -430,7 +431,7 @@ async function handlePayout(room) {
             wallet.publicKey, 
             amountInSmallestUnit, 
             [], 
-            TOKEN_PROGRAM_ID
+            TOKEN_2022_PROGRAM_ID
         );
         
         const tx = new Transaction().add(ix);
