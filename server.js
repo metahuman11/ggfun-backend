@@ -322,6 +322,36 @@ app.get('/api/matches', (req, res) => {
     res.json({ success: true, matches: matchHistory.slice(0, 20) });
 });
 
+// Check if player has active game (for reconnection)
+app.get('/api/my-game/:wallet', (req, res) => {
+    const wallet = req.params.wallet;
+    if (!isValidWallet(wallet)) return res.status(400).json({ error: 'Invalid wallet' });
+    
+    // Find active room where this player is playing
+    for (const [code, room] of rooms.entries()) {
+        if (room.status === 'finished') continue;
+        
+        const player = room.players.find(p => p.wallet === wallet);
+        if (player) {
+            return res.json({
+                success: true,
+                hasActiveGame: true,
+                room: {
+                    code: room.code,
+                    status: room.status,
+                    myColor: player.color,
+                    myPlayerId: player.id,
+                    entryFeeUsd: room.entryFeeUsd,
+                    tokenAmount: room.tokenAmount,
+                    opponent: room.players.find(p => p.wallet !== wallet)?.name || 'Waiting...'
+                }
+            });
+        }
+    }
+    
+    res.json({ success: true, hasActiveGame: false });
+});
+
 // ═══════════════════════════════════════════════════════════════
 // CONFIG & HEALTH
 // ═══════════════════════════════════════════════════════════════
