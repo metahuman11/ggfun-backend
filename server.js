@@ -135,8 +135,32 @@ const profiles = new Map(); // wallet -> profile data
 const matchHistory = []; // All completed matches
 const xVerifications = new Map(); // wallet -> { code, createdAt, xHandle }
 const xLinkedAccounts = new Map(); // wallet -> xHandle (verified)
+const followers = new Map(); // wallet -> Set of follower wallets
+const following = new Map(); // wallet -> Set of following wallets
 let cachedTokenPrice = null;
 let priceLastFetch = 0;
+
+// Pepe avatar options
+const PEPE_AVATARS = [
+    '🐸', '🐸👑', '🐸🎮', '🐸💎', '🐸🔥', '🐸⚡', '🐸🎯', '🐸🏆', '🐸😎', '🐸🚀'
+];
+
+// Cleanup finished rooms every 5 minutes
+setInterval(() => {
+    const now = Date.now();
+    for (const [code, room] of rooms.entries()) {
+        // Delete finished games after 10 minutes
+        if (room.status === 'finished' && room.finishedAt && now - room.finishedAt > 10 * 60 * 1000) {
+            rooms.delete(code);
+            console.log('Cleaned up room:', code);
+        }
+        // Delete empty waiting rooms after 30 minutes
+        if (room.status === 'waiting_players' && room.createdAt && now - room.createdAt > 30 * 60 * 1000) {
+            rooms.delete(code);
+            console.log('Cleaned up stale room:', code);
+        }
+    }
+}, 5 * 60 * 1000);
 
 const INIT_BOARD = [
     ['r','n','b','q','k','b','n','r'],
@@ -219,6 +243,7 @@ function getOrCreateProfile(wallet) {
         profiles.set(wallet, {
             wallet,
             username: usernames.get(wallet) || wallet.slice(0, 8) + '...',
+            avatar: PEPE_AVATARS[Math.floor(Math.random() * PEPE_AVATARS.length)],
             wins: 0,
             losses: 0,
             totalEarnings: 0,
@@ -227,7 +252,24 @@ function getOrCreateProfile(wallet) {
             joinedAt: Date.now()
         });
     }
-    return profiles.get(wallet);
+    // Ensure avatar exists for old profiles
+    const profile = profiles.get(wallet);
+    if (!profile.avatar) {
+        profile.avatar = PEPE_AVATARS[Math.floor(Math.random() * PEPE_AVATARS.length)];
+    }
+    return profile;
+}
+
+function getFollowerCount(wallet) {
+    return followers.get(wallet)?.size || 0;
+}
+
+function getFollowingCount(wallet) {
+    return following.get(wallet)?.size || 0;
+}
+
+function isFollowing(followerWallet, targetWallet) {
+    return following.get(followerWallet)?.has(targetWallet) || false;
 }
 
 function recordMatch(room, winnerWallet, loserWallet) {
@@ -269,6 +311,7 @@ function recordMatch(room, winnerWallet, loserWallet) {
 // Get profile by wallet
 app.get('/api/profile/:wallet', (req, res) => {
     const wallet = req.params.wallet;
+    const viewerWallet = req.query.viewer || null; // Optional: who is viewing
     const profile = getOrCreateProfile(wallet);
     profile.username = getUsername(wallet); // Update username
     profile.xHandle = xLinkedAccounts.get(wallet) || null; // Include X handle
@@ -297,6 +340,9 @@ app.get('/api/profile/:wallet', (req, res) => {
         success: true,
         profile: {
             ...profile,
+            followersCount: getFollowerCount(wallet),
+            followingCount: getFollowingCount(wallet),
+            isFollowing: viewerWallet ? isFollowing(viewerWallet, wallet) : false,
             winRate: profile.wins + profile.losses > 0 
                 ? ((profile.wins / (profile.wins + profile.losses)) * 100).toFixed(1) 
                 : 0,
@@ -306,13 +352,115 @@ app.get('/api/profile/:wallet', (req, res) => {
     });
 });
 
+// Update avatar
+app.post('/api/profile/avatar', (req, res) => {
+    const { wallet, avatar } = req.body;
+    if (!isValidWallet(wallet)) return res.status(400).json({ error: 'Invalid wallet' });
+    
+    // Validate avatar is from our list or a custom emoji
+    const cleanAvatar = sanitizeString(avatar, 10);
+    if (!cleanAvatar) return res.status(400).json({ error: 'Invalid avatar' });
+    
+    const profile = getOrCreateProfile(wallet);
+    profile.avatar = cleanAvatar;
+    
+    console.log('Avatar updated:', wallet.slice(0, 8), '->', cleanAvatar);
+    res.json({ success: true, avatar: cleanAvatar });
+});
+
+// Get available avatars
+app.get('/api/avatars', (req, res) => {
+    res.json({ success: true, avatars: PEPE_AVATARS });
+});
+
+// Follow a user
+app.post('/api/follow', (req, res) => {
+    const { wallet, targetWallet } = req.body;
+    if (!isValidWallet(wallet) || !isValidWallet(targetWallet)) {
+        return res.status(400).json({ error: 'Invalid wallet' });
+    }
+    if (wallet === targetWallet) {
+        return res.status(400).json({ error: 'Cannot follow yourself' });
+    }
+    
+    // Add to following set
+    if (!following.has(wallet)) following.set(wallet, new Set());
+    following.get(wallet).add(targetWallet);
+    
+    // Add to followers set
+    if (!followers.has(targetWallet)) followers.set(targetWallet, new Set());
+    followers.get(targetWallet).add(wallet);
+    
+    console.log('Follow:', wallet.slice(0, 8), '->', targetWallet.slice(0, 8));
+    res.json({ 
+        success: true, 
+        followersCount: getFollowerCount(targetWallet),
+        isFollowing: true 
+    });
+});
+
+// Unfollow a user
+app.post('/api/unfollow', (req, res) => {
+    const { wallet, targetWallet } = req.body;
+    if (!isValidWallet(wallet) || !isValidWallet(targetWallet)) {
+        return res.status(400).json({ error: 'Invalid wallet' });
+    }
+    
+    // Remove from following set
+    following.get(wallet)?.delete(targetWallet);
+    
+    // Remove from followers set
+    followers.get(targetWallet)?.delete(wallet);
+    
+    console.log('Unfollow:', wallet.slice(0, 8), '-X->', targetWallet.slice(0, 8));
+    res.json({ 
+        success: true, 
+        followersCount: getFollowerCount(targetWallet),
+        isFollowing: false 
+    });
+});
+
+// Get followers list
+app.get('/api/followers/:wallet', (req, res) => {
+    const wallet = req.params.wallet;
+    const followerWallets = Array.from(followers.get(wallet) || []);
+    const followerProfiles = followerWallets.map(w => {
+        const p = getOrCreateProfile(w);
+        return {
+            wallet: w,
+            username: getUsername(w),
+            avatar: p.avatar,
+            xHandle: xLinkedAccounts.get(w) || null
+        };
+    });
+    res.json({ success: true, followers: followerProfiles });
+});
+
+// Get following list
+app.get('/api/following/:wallet', (req, res) => {
+    const wallet = req.params.wallet;
+    const followingWallets = Array.from(following.get(wallet) || []);
+    const followingProfiles = followingWallets.map(w => {
+        const p = getOrCreateProfile(w);
+        return {
+            wallet: w,
+            username: getUsername(w),
+            avatar: p.avatar,
+            xHandle: xLinkedAccounts.get(w) || null
+        };
+    });
+    res.json({ success: true, following: followingProfiles });
+});
+
 // Get leaderboard
 app.get('/api/leaderboard', (req, res) => {
     const allProfiles = Array.from(profiles.values())
         .map(p => ({
             ...p,
             username: getUsername(p.wallet),
+            avatar: p.avatar || '🐸',
             xHandle: xLinkedAccounts.get(p.wallet) || null,
+            followersCount: getFollowerCount(p.wallet),
             winRate: p.wins + p.losses > 0 ? ((p.wins / (p.wins + p.losses)) * 100).toFixed(1) : 0
         }))
         .sort((a, b) => b.wins - a.wins)
@@ -620,6 +768,7 @@ app.post('/api/rooms', async (req, res) => {
     
     const room = {
         code, 
+        createdAt: Date.now(),
         entryFeeUsd: usdAmount,           // USD value for display
         tokenAmount: tokenAmount,          // Actual token amount both players pay
         tokenPriceAtCreation: tokenPrice,  // Price when room was created
@@ -632,9 +781,11 @@ app.post('/api/rooms', async (req, res) => {
         whiteTimeMs: GAME_TIME_MS,
         blackTimeMs: GAME_TIME_MS,
         lastMoveTime: null,
+        finishedAt: null,
         players: [{ id: 0, wallet: creatorWallet, name: getUsername(creatorWallet), color: 'white', paid: false }],
         spectators: [],
-        emojis: []
+        emojis: [],
+        chat: []
     };
     rooms.set(code, room);
     console.log(`Room created: ${code} - ${tokenAmount} ${TOKEN_SYMBOL} (~$${usdAmount})`);
@@ -665,7 +816,14 @@ app.post('/api/rooms/:code/spectate', (req, res) => {
     if (!room) return res.status(404).json({ error: 'Not found' });
     
     const { wallet } = req.body;
-    const spectator = { wallet, name: getUsername(wallet), joinedAt: Date.now() };
+    const profile = wallet ? getOrCreateProfile(wallet) : null;
+    const spectator = { 
+        wallet, 
+        name: getUsername(wallet), 
+        avatar: profile?.avatar || '👀',
+        xHandle: xLinkedAccounts.get(wallet) || null,
+        joinedAt: Date.now() 
+    };
     
     if (!room.spectators.find(s => s.wallet === wallet)) {
         room.spectators.push(spectator);
@@ -673,6 +831,25 @@ app.post('/api/rooms/:code/spectate', (req, res) => {
     }
     
     res.json({ success: true, room: sanitizeRoom(room) });
+});
+
+// Get spectators with full profiles
+app.get('/api/rooms/:code/spectators', (req, res) => {
+    const room = rooms.get(req.params.code.toUpperCase());
+    if (!room) return res.status(404).json({ error: 'Not found' });
+    
+    const spectators = room.spectators.map(s => {
+        const profile = s.wallet ? getOrCreateProfile(s.wallet) : null;
+        return {
+            wallet: s.wallet,
+            name: getUsername(s.wallet),
+            avatar: profile?.avatar || '👀',
+            xHandle: xLinkedAccounts.get(s.wallet) || null,
+            wins: profile?.wins || 0
+        };
+    });
+    
+    res.json({ success: true, spectators });
 });
 
 app.post('/api/rooms/:code/emoji', (req, res) => {
@@ -784,10 +961,12 @@ app.get('/api/rooms/:code/state', (req, res) => {
     
     updateTimer(room);
     
-    // Update player names and X handles from maps
+    // Update player info from maps
     room.players.forEach(p => {
         p.name = getUsername(p.wallet);
         p.xHandle = xLinkedAccounts.get(p.wallet) || null;
+        const profile = p.wallet ? getOrCreateProfile(p.wallet) : null;
+        p.avatar = profile?.avatar || '🐸';
     });
     
     res.json({
@@ -802,7 +981,13 @@ app.get('/api/rooms/:code/state', (req, res) => {
             name: p.name, 
             color: p.color, 
             paymentConfirmed: p.paid,
-            xHandle: p.xHandle 
+            xHandle: p.xHandle,
+            avatar: p.avatar
+        })),
+        spectators: room.spectators.slice(-10).map(s => ({
+            wallet: s.wallet,
+            name: s.name,
+            avatar: s.avatar || '👀'
         })),
         spectatorCount: room.spectators.length,
         emojis: room.emojis.slice(-10),
@@ -819,6 +1004,7 @@ function updateTimer(room) {
         if (room.whiteTimeMs <= 0) {
             room.winner = 1;
             room.status = 'finished';
+            room.finishedAt = Date.now();
             console.log('White timeout! Black wins:', room.code);
             handlePayout(room);
         }
@@ -827,6 +1013,7 @@ function updateTimer(room) {
         if (room.blackTimeMs <= 0) {
             room.winner = 0;
             room.status = 'finished';
+            room.finishedAt = Date.now();
             console.log('Black timeout! White wins:', room.code);
             handlePayout(room);
         }
@@ -923,6 +1110,7 @@ app.post('/api/rooms/:code/move', (req, res) => {
     if (capturedKing) {
         room.winner = playerId;
         room.status = 'finished';
+        room.finishedAt = Date.now();
         console.log('Winner:', player.name);
         handlePayout(room);
         return res.json({ success: true, board: room.board, gameOver: true, winner: playerId });
