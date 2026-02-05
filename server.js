@@ -2,6 +2,7 @@
  * Chess Arena v5 - Custom Token Support ($TEST)
  * - Token based payments (same token amount for both players)
  * - Price fetched from Jupiter/DexScreener at room creation
+ * - Security hardened
  */
 const express = require('express');
 const cors = require('cors');
@@ -10,8 +11,95 @@ const { getAssociatedTokenAddress, createTransferInstruction, TOKEN_2022_PROGRAM
 const bs58 = require('bs58');
 
 const app = express();
-app.use(cors());
-app.use(express.json());
+
+// ═══════════════════════════════════════════════════════════════
+// SECURITY MIDDLEWARE
+// ═══════════════════════════════════════════════════════════════
+
+// CORS - only allow specific origins in production
+const allowedOrigins = [
+    'https://chess-arena-solana.netlify.app',
+    'http://localhost:3000',
+    'http://localhost:5173'
+];
+
+app.use(cors({
+    origin: function(origin, callback) {
+        // Allow requests with no origin (mobile apps, curl, etc.)
+        if (!origin) return callback(null, true);
+        if (allowedOrigins.some(allowed => origin.startsWith(allowed.replace(/:\d+$/, '')))) {
+            return callback(null, true);
+        }
+        // In development, allow all
+        if (process.env.NODE_ENV !== 'production') return callback(null, true);
+        callback(new Error('Not allowed by CORS'));
+    },
+    credentials: true
+}));
+
+// Security headers
+app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('X-XSS-Protection', '1; mode=block');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=()');
+    next();
+});
+
+// Rate limiting (simple in-memory)
+const rateLimits = new Map();
+const RATE_LIMIT_WINDOW = 60000; // 1 minute
+const RATE_LIMIT_MAX = 100; // max requests per minute
+
+app.use((req, res, next) => {
+    const ip = req.ip || req.connection.remoteAddress;
+    const now = Date.now();
+    
+    if (!rateLimits.has(ip)) {
+        rateLimits.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW });
+    } else {
+        const limit = rateLimits.get(ip);
+        if (now > limit.resetAt) {
+            limit.count = 1;
+            limit.resetAt = now + RATE_LIMIT_WINDOW;
+        } else {
+            limit.count++;
+            if (limit.count > RATE_LIMIT_MAX) {
+                return res.status(429).json({ error: 'Too many requests. Please slow down.' });
+            }
+        }
+    }
+    next();
+});
+
+// Clean up rate limits every 5 minutes
+setInterval(() => {
+    const now = Date.now();
+    for (const [ip, limit] of rateLimits.entries()) {
+        if (now > limit.resetAt + RATE_LIMIT_WINDOW) {
+            rateLimits.delete(ip);
+        }
+    }
+}, 300000);
+
+app.use(express.json({ limit: '10kb' })); // Limit body size
+
+// Input validation helper
+function isValidWallet(address) {
+    if (!address || typeof address !== 'string') return false;
+    try {
+        new PublicKey(address);
+        return address.length >= 32 && address.length <= 44;
+    } catch {
+        return false;
+    }
+}
+
+function sanitizeString(str, maxLen = 100) {
+    if (typeof str !== 'string') return '';
+    return str.slice(0, maxLen).replace(/[<>]/g, '');
+}
 
 const PORT = process.env.PORT || 3001;
 const SOLANA_RPC = process.env.SOLANA_RPC || 'https://api.mainnet-beta.solana.com';
@@ -106,11 +194,14 @@ async function getTokenPrice() {
 app.post('/api/username', (req, res) => {
     const { wallet, username } = req.body;
     if (!wallet || !username) return res.status(400).json({ error: 'Missing data' });
-    if (username.length > 20) return res.status(400).json({ error: 'Max 20 chars' });
+    if (!isValidWallet(wallet)) return res.status(400).json({ error: 'Invalid wallet' });
     
-    usernames.set(wallet, username.trim());
-    console.log('Username set:', wallet.slice(0,8), '->', username);
-    res.json({ success: true, username: username.trim() });
+    const cleanUsername = sanitizeString(username, 20).trim();
+    if (cleanUsername.length < 1) return res.status(400).json({ error: 'Invalid username' });
+    
+    usernames.set(wallet, cleanUsername);
+    console.log('Username set:', wallet.slice(0,8), '->', cleanUsername);
+    res.json({ success: true, username: cleanUsername });
 });
 
 app.get('/api/username/:wallet', (req, res) => {
@@ -322,6 +413,13 @@ app.post('/api/rooms/:code/join', (req, res) => {
     if (room.players.length >= 2) return res.status(400).json({ error: 'Full' });
     
     const { playerWallet } = req.body;
+    if (!isValidWallet(playerWallet)) return res.status(400).json({ error: 'Invalid wallet' });
+    
+    // Prevent same player joining twice
+    if (room.players.some(p => p.wallet === playerWallet)) {
+        return res.status(400).json({ error: 'Already in room' });
+    }
+    
     room.players.push({ id: 1, wallet: playerWallet, name: getUsername(playerWallet), color: 'black', paid: false });
     room.status = 'waiting_payments';
     console.log('Player joined:', room.code);
@@ -363,11 +461,17 @@ app.post('/api/rooms/:code/chat', (req, res) => {
     if (!room) return res.status(404).json({ error: 'Not found' });
     
     const { wallet, message } = req.body;
-    if (!message || message.trim().length === 0) return res.status(400).json({ error: 'Empty message' });
-    if (message.length > 200) return res.status(400).json({ error: 'Message too long' });
+    if (!isValidWallet(wallet)) return res.status(400).json({ error: 'Invalid wallet' });
+    
+    const cleanMessage = sanitizeString(message, 200).trim();
+    if (cleanMessage.length === 0) return res.status(400).json({ error: 'Empty message' });
     
     // Initialize chat array if not exists
     if (!room.chat) room.chat = [];
+    
+    // Rate limit chat (max 10 messages per minute per user)
+    const recentMsgs = room.chat.filter(m => m.wallet === wallet && m.time > Date.now() - 60000);
+    if (recentMsgs.length >= 10) return res.status(429).json({ error: 'Too many messages, slow down' });
     
     // Determine if player or spectator
     const player = room.players.find(p => p.wallet === wallet);
@@ -375,9 +479,9 @@ app.post('/api/rooms/:code/chat', (req, res) => {
     
     const chatMsg = {
         id: Date.now().toString(36) + Math.random().toString(36).slice(2, 4),
-        wallet,
+        wallet: wallet.slice(0, 8) + '...', // Don't expose full wallet in chat
         name: getUsername(wallet),
-        message: message.trim(),
+        message: cleanMessage,
         isPlayer,
         color: player?.color || null,
         time: Date.now()
