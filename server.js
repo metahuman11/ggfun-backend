@@ -1081,6 +1081,68 @@ app.get('/api/rooms/:code/chat', (req, res) => {
     res.json({ success: true, messages });
 });
 
+// ═══════════════════════════════════════════════════════════════
+// GLOBAL CHAT (Lobby Chat for connected wallets)
+// ═══════════════════════════════════════════════════════════════
+let globalChat = [];
+const GLOBAL_CHAT_MAX = 100;
+const GLOBAL_CHAT_RATE_LIMIT = 2000; // 2 seconds between messages
+const globalChatLastMsg = new Map(); // wallet -> timestamp
+
+// Send global chat message
+app.post('/api/chat', (req, res) => {
+    const { wallet, message } = req.body;
+    
+    if (!wallet || !message) {
+        return res.status(400).json({ error: 'Missing wallet or message' });
+    }
+    
+    // Validate wallet is registered
+    if (!usernames.has(wallet)) {
+        return res.status(403).json({ error: 'Please set a username first' });
+    }
+    
+    // Rate limit
+    const lastMsg = globalChatLastMsg.get(wallet) || 0;
+    if (Date.now() - lastMsg < GLOBAL_CHAT_RATE_LIMIT) {
+        return res.status(429).json({ error: 'Please wait before sending another message' });
+    }
+    
+    // Sanitize message
+    const cleanMsg = message.toString().slice(0, 200).trim();
+    if (!cleanMsg) {
+        return res.status(400).json({ error: 'Empty message' });
+    }
+    
+    const username = usernames.get(wallet) || wallet.slice(0, 6);
+    const profile = profiles.get(wallet) || {};
+    
+    const chatMsg = {
+        wallet: wallet.slice(0, 8) + '...',
+        username,
+        avatar: profile.avatar || '🐸',
+        message: cleanMsg,
+        time: Date.now()
+    };
+    
+    globalChat.push(chatMsg);
+    globalChatLastMsg.set(wallet, Date.now());
+    
+    // Keep last N messages
+    if (globalChat.length > GLOBAL_CHAT_MAX) {
+        globalChat = globalChat.slice(-GLOBAL_CHAT_MAX);
+    }
+    
+    res.json({ success: true, message: chatMsg });
+});
+
+// Get global chat messages
+app.get('/api/chat', (req, res) => {
+    const since = parseInt(req.query.since) || 0;
+    const messages = globalChat.filter(m => m.time > since);
+    res.json({ success: true, messages });
+});
+
 // List all active rooms
 app.get('/api/rooms', (req, res) => {
     const activeRooms = [];
