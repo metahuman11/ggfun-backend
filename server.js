@@ -117,6 +117,34 @@ setInterval(saveData, 2 * 60 * 1000);
 process.on('SIGTERM', async () => { await saveData(); process.exit(0); });
 process.on('SIGINT', async () => { await saveData(); process.exit(0); });
 
+// ═══════════════════════════════════════════════════════════════
+// TELEGRAM NOTIFICATIONS
+// ═══════════════════════════════════════════════════════════════
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8366770253:AAEugTrgEE2YnXIftShfwKYT8vGlwddN-Bg';
+const TELEGRAM_GROUP_ID = process.env.TELEGRAM_GROUP_ID || '-1003559502036';
+
+async function sendTelegramNotification(message) {
+    if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_GROUP_ID) return;
+    try {
+        const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                chat_id: TELEGRAM_GROUP_ID,
+                text: message,
+                parse_mode: 'HTML',
+                disable_web_page_preview: false
+            })
+        });
+        const data = await res.json();
+        if (!data.ok) console.error('Telegram notification failed:', data.description);
+        else console.log('📢 Telegram notification sent');
+    } catch (e) {
+        console.error('Telegram notification error:', e.message);
+    }
+}
+
 const app = express();
 
 // ═══════════════════════════════════════════════════════════════
@@ -978,6 +1006,19 @@ app.post('/api/rooms', async (req, res) => {
     };
     rooms.set(code, room);
     console.log(`Room created: ${code} - ${tokenAmount} ${TOKEN_SYMBOL} (~$${usdAmount})`);
+    
+    // Send Telegram notification
+    const creatorName = getUsername(creatorWallet) || 'Anonymous';
+    const telegramMsg = `🎮 <b>New Chess Room!</b>
+
+💰 Entry: <b>${tokenAmount.toLocaleString()} $GGFUN</b> (~$${usdAmount})
+👤 Creator: ${creatorName}
+🎯 Room: <code>${code}</code>
+
+🔗 <a href="https://ggfun.lol?room=${code}">Join Now →</a>`;
+    
+    sendTelegramNotification(telegramMsg);
+    
     res.json({ success: true, room: sanitizeRoom(room), myPlayerId: 0, myColor: 'white' });
 });
 
