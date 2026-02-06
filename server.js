@@ -1270,7 +1270,11 @@ app.get('/api/rooms/:code/state', (req, res) => {
         })),
         spectatorCount: room.spectators.length,
         emojis: room.emojis.slice(-10),
-        chatCount: (room.chat || []).length
+        chatCount: (room.chat || []).length,
+        // Draw/Resign info
+        drawOfferedBy: room.drawOfferedBy,
+        isDraw: room.isDraw || false,
+        resignedBy: room.resignedBy
     });
 });
 
@@ -1311,7 +1315,13 @@ function sanitizeRoom(room) {
         payoutTx: room.payoutTx || null,
         payoutAmount: room.payoutAmount || null,
         payoutTime: room.payoutTime || null,
-        payoutError: room.payoutError || null
+        payoutError: room.payoutError || null,
+        // Draw/Resign info
+        drawOfferedBy: room.drawOfferedBy,
+        drawOfferedAt: room.drawOfferedAt,
+        isDraw: room.isDraw || false,
+        resignedBy: room.resignedBy,
+        drawPayoutTx: room.drawPayoutTx || null
     };
 }
 
@@ -1444,8 +1454,166 @@ app.post('/api/rooms/:code/move', (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
+// RESIGN - Player forfeits and pays 10% penalty to opponent
+// ═══════════════════════════════════════════════════════════════
+app.post('/api/rooms/:code/resign', async (req, res) => {
+    try {
+        const { playerId } = req.body;
+        const code = req.params.code?.toUpperCase();
+        const room = rooms.get(code);
+        
+        if (!room) return res.status(404).json({ error: 'Room not found' });
+        if (room.status !== 'playing') return res.status(400).json({ error: 'Game not in progress' });
+        if (room.winner !== null) return res.status(400).json({ error: 'Game already over' });
+        if (playerId === undefined || playerId === null) return res.status(400).json({ error: 'Missing player ID' });
+        
+        const resigningPlayer = room.players?.[playerId];
+        if (!resigningPlayer) return res.status(400).json({ error: 'Invalid player' });
+        
+        // The other player wins
+        const winnerId = playerId === 0 ? 1 : 0;
+        room.winner = winnerId;
+        room.status = 'finished';
+        room.finishedAt = Date.now();
+        room.resignedBy = playerId;
+        
+        console.log(`Player ${resigningPlayer.name} resigned in room ${code}`);
+        
+        // Handle payout - winner gets full prize, resigner pays 10% penalty
+        await handlePayout(room);
+        
+        res.json({ success: true, gameOver: true, winner: winnerId, resigned: true });
+    } catch (e) {
+        console.error('Resign error:', e.message);
+        res.status(500).json({ error: 'Failed to process resignation' });
+    }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// DRAW - Both players agree to draw, each gets their money back minus 5% fee
+// ═══════════════════════════════════════════════════════════════
+app.post('/api/rooms/:code/draw-offer', (req, res) => {
+    try {
+        const { playerId } = req.body;
+        const code = req.params.code?.toUpperCase();
+        const room = rooms.get(code);
+        
+        if (!room) return res.status(404).json({ error: 'Room not found' });
+        if (room.status !== 'playing') return res.status(400).json({ error: 'Game not in progress' });
+        if (room.winner !== null) return res.status(400).json({ error: 'Game already over' });
+        
+        const player = room.players?.[playerId];
+        if (!player) return res.status(400).json({ error: 'Invalid player' });
+        
+        room.drawOfferedBy = playerId;
+        room.drawOfferedAt = Date.now();
+        
+        console.log(`Draw offered by ${player.name} in room ${code}`);
+        res.json({ success: true, message: 'Draw offer sent' });
+    } catch (e) {
+        console.error('Draw offer error:', e.message);
+        res.status(500).json({ error: 'Failed to offer draw' });
+    }
+});
+
+app.post('/api/rooms/:code/draw-accept', async (req, res) => {
+    try {
+        const { playerId } = req.body;
+        const code = req.params.code?.toUpperCase();
+        const room = rooms.get(code);
+        
+        if (!room) return res.status(404).json({ error: 'Room not found' });
+        if (room.status !== 'playing') return res.status(400).json({ error: 'Game not in progress' });
+        if (room.winner !== null) return res.status(400).json({ error: 'Game already over' });
+        if (room.drawOfferedBy === undefined) return res.status(400).json({ error: 'No draw offer pending' });
+        if (room.drawOfferedBy === playerId) return res.status(400).json({ error: 'Cannot accept your own draw offer' });
+        
+        // Draw expired after 30 seconds
+        if (Date.now() - room.drawOfferedAt > 30000) {
+            room.drawOfferedBy = undefined;
+            return res.status(400).json({ error: 'Draw offer expired' });
+        }
+        
+        room.status = 'finished';
+        room.finishedAt = Date.now();
+        room.winner = 'draw';
+        room.isDraw = true;
+        
+        console.log(`Draw accepted in room ${code}`);
+        
+        // Handle draw payout - each player gets back their entry minus 5% fee
+        await handleDrawPayout(room);
+        
+        res.json({ success: true, gameOver: true, isDraw: true });
+    } catch (e) {
+        console.error('Draw accept error:', e.message);
+        res.status(500).json({ error: 'Failed to accept draw' });
+    }
+});
+
+app.post('/api/rooms/:code/draw-decline', (req, res) => {
+    try {
+        const code = req.params.code?.toUpperCase();
+        const room = rooms.get(code);
+        
+        if (!room) return res.status(404).json({ error: 'Room not found' });
+        
+        room.drawOfferedBy = undefined;
+        room.drawOfferedAt = undefined;
+        
+        res.json({ success: true, message: 'Draw declined' });
+    } catch (e) {
+        res.status(500).json({ error: 'Failed to decline draw' });
+    }
+});
+
+// ═══════════════════════════════════════════════════════════════
 // PAYOUT - Send tokens to winner
 // ═══════════════════════════════════════════════════════════════
+async function handleDrawPayout(room) {
+    if (!wallet) {
+        console.log('No wallet configured for payout');
+        return;
+    }
+    
+    // Each player gets back 95% of their entry (5% fee total)
+    const refundTokens = Math.floor(room.tokenAmount * 0.95);
+    
+    for (const player of room.players) {
+        if (!player?.wallet) continue;
+        
+        try {
+            const recipient = new PublicKey(player.wallet);
+            const senderATA = await getAssociatedTokenAddress(TOKEN_MINT, wallet.publicKey, false, TOKEN_2022_PROGRAM_ID);
+            const recipientATA = await getAssociatedTokenAddress(TOKEN_MINT, recipient, false, TOKEN_2022_PROGRAM_ID);
+            
+            const amountInSmallestUnit = refundTokens * Math.pow(10, TOKEN_DECIMALS);
+            
+            const ix = createTransferInstruction(
+                senderATA, 
+                recipientATA, 
+                wallet.publicKey, 
+                amountInSmallestUnit, 
+                [], 
+                TOKEN_2022_PROGRAM_ID
+            );
+            
+            const tx = new Transaction().add(ix);
+            tx.feePayer = wallet.publicKey;
+            tx.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
+            tx.sign(wallet);
+            
+            const sig = await connection.sendRawTransaction(tx.serialize());
+            console.log(`Draw refund sent: ${refundTokens} ${TOKEN_SYMBOL} to ${player.name}, tx: ${sig}`);
+            
+            if (!room.drawPayoutTx) room.drawPayoutTx = [];
+            room.drawPayoutTx.push({ player: player.name, tx: sig, amount: refundTokens });
+        } catch (e) {
+            console.error(`Draw refund error for ${player.name}:`, e.message);
+        }
+    }
+}
+
 async function handlePayout(room) {
     const winner = room.players[room.winner];
     const loser = room.players.find(p => p.id !== room.winner);
