@@ -978,10 +978,11 @@ app.post('/api/rooms', async (req, res) => {
     
     // Get current token price
     const tokenPrice = await getTokenPrice();
-    const usdAmount = parseFloat(entryFeeUsd) || 5;
+    const usdAmount = parseFloat(entryFeeUsd) || 0; // Default to free
+    const isFreeGame = usdAmount === 0;
     
     // Calculate token amount (how many tokens = $X USD)
-    const tokenAmount = Math.floor(usdAmount / tokenPrice);
+    const tokenAmount = isFreeGame ? 0 : Math.floor(usdAmount / tokenPrice);
     
     const room = {
         code, 
@@ -989,8 +990,9 @@ app.post('/api/rooms', async (req, res) => {
         entryFeeUsd: usdAmount,           // USD value for display
         tokenAmount: tokenAmount,          // Actual token amount both players pay
         tokenPriceAtCreation: tokenPrice,  // Price when room was created
+        isFreeGame: isFreeGame,            // Free game flag
         status: 'waiting_players',
-        confirmedPayments: 0,
+        confirmedPayments: isFreeGame ? 2 : 0, // Free games don't need payment
         board: INIT_BOARD.map(r => [...r]),
         currentTurn: 'white',
         lastMove: null,
@@ -999,18 +1001,26 @@ app.post('/api/rooms', async (req, res) => {
         blackTimeMs: GAME_TIME_MS,
         lastMoveTime: null,
         finishedAt: null,
-        players: [{ id: 0, wallet: creatorWallet, name: getUsername(creatorWallet), color: 'white', paid: false }],
+        players: [{ id: 0, wallet: creatorWallet, name: getUsername(creatorWallet), color: 'white', paid: isFreeGame }],
         spectators: [],
         emojis: [],
         chat: []
     };
     rooms.set(code, room);
-    console.log(`Room created: ${code} - ${tokenAmount} ${TOKEN_SYMBOL} (~$${usdAmount})`);
+    console.log(`Room created: ${code} - ${isFreeGame ? 'FREE' : tokenAmount + ' ' + TOKEN_SYMBOL} (~$${usdAmount})`);
     
     // Send Telegram notification
     const creatorName = getUsername(creatorWallet) || 'Anonymous';
     const roomLink = `https://ggfun.lol?room=${code}`;
-    const telegramMsg = `🎮 <b>New Chess Room!</b>
+    const telegramMsg = isFreeGame 
+        ? `🎮 <b>New Free Chess Room!</b>
+
+🆓 Entry: <b>FREE</b>
+👤 Creator: ${creatorName}
+🎯 Room: <code>${code}</code>
+
+🔗 ${roomLink}`
+        : `🎮 <b>New Chess Room!</b>
 
 💰 Entry: <b>${tokenAmount.toLocaleString()} $GGFUN</b> (~$${usdAmount})
 👤 Creator: ${creatorName}
@@ -1053,9 +1063,18 @@ app.post('/api/rooms/:code/join', (req, res) => {
             return res.status(400).json({ error: 'Room is full' });
         }
         
-        const newPlayer = { id: 1, wallet: playerWallet, name: getUsername(playerWallet), color: 'black', paid: false };
+        const newPlayer = { id: 1, wallet: playerWallet, name: getUsername(playerWallet), color: 'black', paid: room.isFreeGame };
         room.players.push(newPlayer);
-        room.status = 'waiting_payments';
+        
+        // Free games start immediately when player 2 joins
+        if (room.isFreeGame) {
+            room.status = 'playing';
+            room.lastMoveTime = Date.now();
+            console.log('Free game started:', room.code);
+        } else {
+            room.status = 'waiting_payments';
+        }
+        
         console.log('Player joined:', room.code, 'as', newPlayer.color);
         res.json({ success: true, room: sanitizeRoom(room), myPlayerId: newPlayer.id, myColor: newPlayer.color });
     } catch (e) {
@@ -1409,6 +1428,7 @@ function sanitizeRoom(room) {
         ...room,
         walletAddress: WALLET_ADDRESS,
         tokenSymbol: TOKEN_SYMBOL,
+        isFreeGame: room.isFreeGame || false,
         players: room.players.map(p => ({ id: p.id, name: p.name, color: p.color, paid: p.paid })),
         spectatorCount: room.spectators.length,
         // Payout proof
