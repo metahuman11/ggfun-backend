@@ -943,8 +943,11 @@ app.post('/api/rooms/:code/chat', (req, res) => {
     const room = rooms.get(req.params.code.toUpperCase());
     if (!room) return res.status(404).json({ error: 'Not found' });
     
-    const { wallet, message } = req.body;
-    if (!isValidWallet(wallet)) return res.status(400).json({ error: 'Invalid wallet' });
+    const { wallet, message, guestId, guestName } = req.body;
+    
+    // Allow either valid wallet OR guest ID
+    const isGuest = !wallet && guestId && guestId.startsWith('guest_');
+    if (!isGuest && !isValidWallet(wallet)) return res.status(400).json({ error: 'Invalid wallet or guest ID' });
     
     const cleanMessage = sanitizeString(message, 200).trim();
     if (cleanMessage.length === 0) return res.status(400).json({ error: 'Empty message' });
@@ -952,18 +955,26 @@ app.post('/api/rooms/:code/chat', (req, res) => {
     // Initialize chat array if not exists
     if (!room.chat) room.chat = [];
     
-    // Rate limit removed per user request
+    // Rate limit for guests (1 message per 3 seconds)
+    if (isGuest) {
+        const lastGuestMsg = room.chat.filter(m => m.guestId === guestId).pop();
+        if (lastGuestMsg && Date.now() - lastGuestMsg.time < 3000) {
+            return res.status(429).json({ error: 'Please wait before sending another message' });
+        }
+    }
     
     // Determine if player or spectator
-    const player = room.players.find(p => p.wallet === wallet);
+    const player = wallet ? room.players.find(p => p.wallet === wallet) : null;
     const isPlayer = !!player;
     
     const chatMsg = {
         id: Date.now().toString(36) + Math.random().toString(36).slice(2, 4),
-        wallet: wallet.slice(0, 8) + '...', // Don't expose full wallet in chat
-        name: getUsername(wallet),
+        wallet: isGuest ? null : wallet.slice(0, 8) + '...',
+        guestId: isGuest ? guestId : null,
+        name: isGuest ? (sanitizeString(guestName, 20) || 'Guest') : getUsername(wallet),
         message: cleanMessage,
         isPlayer,
+        isGuest,
         color: player?.color || null,
         time: Date.now()
     };
