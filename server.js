@@ -886,6 +886,34 @@ app.get('/api/blockhash', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Get token account for a wallet (Token-2022 compatible)
+app.get('/api/token-account/:wallet', async (req, res) => {
+    try {
+        const wallet = req.params.wallet;
+        if (!isValidWallet(wallet)) return res.status(400).json({ error: 'Invalid wallet' });
+        
+        const walletPubkey = new PublicKey(wallet);
+        const tokenAccounts = await connection.getParsedTokenAccountsByOwner(walletPubkey, { mint: TOKEN_MINT });
+        
+        if (tokenAccounts.value.length === 0) {
+            return res.json({ success: false, error: 'No token account found' });
+        }
+        
+        const account = tokenAccounts.value[0];
+        const balance = parseInt(account.account.data.parsed.info.tokenAmount.amount || '0');
+        
+        res.json({ 
+            success: true, 
+            account: account.pubkey.toString(),
+            balance: balance,
+            uiBalance: balance / Math.pow(10, TOKEN_DECIMALS)
+        });
+    } catch (e) { 
+        console.error('Token account lookup error:', e.message);
+        res.status(500).json({ success: false, error: e.message }); 
+    }
+});
+
 // Check if an account (ATA) exists
 app.get('/api/check-ata', async (req, res) => {
     try {
