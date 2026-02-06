@@ -71,6 +71,8 @@ const app = express();
 
 // CORS - only allow specific origins in production
 const allowedOrigins = [
+    'https://ggfun.lol',
+    'https://www.ggfun.lol',
     'https://chess-arena-solana.netlify.app',
     'http://localhost:3000',
     'http://localhost:5173'
