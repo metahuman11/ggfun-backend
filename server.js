@@ -1271,16 +1271,29 @@ app.post('/api/payments/verify', async (req, res) => {
     if (room.status === 'playing') return res.status(400).json({ error: 'Game started' });
     if (processedTx.has(txSignature)) return res.status(400).json({ error: 'Already processed' });
     
+    // Check if this wallet already paid in this room (prevent self-play)
+    const alreadyPaid = room.players.find(p => p.wallet === playerWallet && p.paid);
+    if (alreadyPaid) {
+        return res.status(400).json({ error: 'You already paid for this room. Cannot play against yourself!' });
+    }
+    
     try {
         const tx = await connection.getTransaction(txSignature, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' });
         if (!tx) return res.status(400).json({ error: 'TX not found' });
         if (tx.meta?.err) return res.status(400).json({ error: 'TX failed' });
         
-        // TODO: Verify exact token amount in transaction matches room.tokenAmount
-        // For now, trust the transaction
-        
-        const player = room.players.find(p => !p.paid);
+        // Find the player with this wallet, or the first unpaid player
+        let player = room.players.find(p => p.wallet === playerWallet && !p.paid);
+        if (!player) {
+            player = room.players.find(p => !p.paid);
+        }
         if (!player) return res.status(400).json({ error: 'All paid' });
+        
+        // Prevent same wallet from being both players
+        const otherPlayer = room.players.find(p => p.wallet === playerWallet && p !== player);
+        if (otherPlayer) {
+            return res.status(400).json({ error: 'Cannot play against yourself!' });
+        }
         
         player.paid = true;
         player.wallet = playerWallet;
