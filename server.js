@@ -156,12 +156,17 @@ app.use((req, res, next) => {
     next();
 });
 
-// Rate limiting (simple in-memory)
+// Rate limiting (simple in-memory) - Increased for game polling
 const rateLimits = new Map();
 const RATE_LIMIT_WINDOW = 60000; // 1 minute
-const RATE_LIMIT_MAX = 100; // max requests per minute
+const RATE_LIMIT_MAX = 300; // max requests per minute (increased from 100)
 
 app.use((req, res, next) => {
+    // Skip rate limiting for health checks
+    if (req.path === '/api/health' || req.path === '/api/config') {
+        return next();
+    }
+    
     const ip = req.ip || req.connection.remoteAddress;
     const now = Date.now();
     
@@ -175,6 +180,7 @@ app.use((req, res, next) => {
         } else {
             limit.count++;
             if (limit.count > RATE_LIMIT_MAX) {
+                console.warn(`Rate limit exceeded for ${ip}: ${limit.count} requests`);
                 return res.status(429).json({ error: 'Too many requests. Please slow down.' });
             }
         }
