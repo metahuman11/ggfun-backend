@@ -215,7 +215,7 @@ const SOLANA_RPC = process.env.SOLANA_RPC || 'https://api.mainnet-beta.solana.co
 const WALLET_PRIVATE_KEY = process.env.WALLET_PRIVATE_KEY || '';
 
 // Custom Token Configuration
-const TOKEN_MINT = new PublicKey('9mWXQkKkXfB7dajdL2ugHVo5PLK4YvuN21mJK9yNpump');
+const TOKEN_MINT = new PublicKey('BY31GbusfpHcG8idNvP5osfndSECCPrp6BxCr9Z5pump');
 const TOKEN_SYMBOL = '$TEST';
 const TOKEN_DECIMALS = 6; // Most pump.fun tokens have 6 decimals
 
