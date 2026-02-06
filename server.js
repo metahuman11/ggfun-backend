@@ -1009,13 +1009,14 @@ app.post('/api/rooms', async (req, res) => {
     
     // Send Telegram notification
     const creatorName = getUsername(creatorWallet) || 'Anonymous';
+    const roomLink = `https://ggfun.lol?room=${code}`;
     const telegramMsg = `🎮 <b>New Chess Room!</b>
 
 💰 Entry: <b>${tokenAmount.toLocaleString()} $GGFUN</b> (~$${usdAmount})
 👤 Creator: ${creatorName}
 🎯 Room: <code>${code}</code>
 
-🔗 <a href="https://ggfun.lol?room=${code}">Join Now →</a>`;
+🔗 ${roomLink}`;
     
     sendTelegramNotification(telegramMsg);
     
