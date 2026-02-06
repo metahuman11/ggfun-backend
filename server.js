@@ -1284,7 +1284,12 @@ function sanitizeRoom(room) {
         walletAddress: WALLET_ADDRESS,
         tokenSymbol: TOKEN_SYMBOL,
         players: room.players.map(p => ({ id: p.id, name: p.name, color: p.color, paid: p.paid })),
-        spectatorCount: room.spectators.length
+        spectatorCount: room.spectators.length,
+        // Payout proof
+        payoutTx: room.payoutTx || null,
+        payoutAmount: room.payoutAmount || null,
+        payoutTime: room.payoutTime || null,
+        payoutError: room.payoutError || null
     };
 }
 
@@ -1440,8 +1445,17 @@ async function handlePayout(room) {
         
         const sig = await connection.sendRawTransaction(tx.serialize());
         console.log(`Payout sent: ${payoutTokens} ${TOKEN_SYMBOL} to ${winner.name}, tx: ${sig}`);
+        
+        // Save transaction signature for proof
+        room.payoutTx = sig;
+        room.payoutAmount = payoutTokens;
+        room.payoutTime = Date.now();
+        
+        return sig;
     } catch (e) { 
-        console.error('Payout error:', e.message); 
+        console.error('Payout error:', e.message);
+        room.payoutError = e.message;
+        return null;
     }
 }
 
