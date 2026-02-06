@@ -1175,6 +1175,12 @@ app.get('/api/chat', (req, res) => {
 app.get('/api/rooms', (req, res) => {
     const activeRooms = [];
     rooms.forEach((room, code) => {
+        // Only show rooms where the creator (player 0) has paid
+        const creatorPaid = room.players[0]?.paid === true;
+        if (!creatorPaid && room.status !== 'playing') {
+            return; // Don't show unpaid rooms in lobby
+        }
+        
         activeRooms.push({
             code: room.code,
             status: room.status,
