@@ -1032,14 +1032,25 @@ app.post('/api/rooms/:code/join', (req, res) => {
         if (!room) return res.status(404).json({ error: 'Room not found' });
         if (room.status === 'finished') return res.status(400).json({ error: 'Game already finished' });
         if (room.status === 'playing') return res.status(400).json({ error: 'Game already started' });
-        if (!room.players || room.players.length >= 2) return res.status(400).json({ error: 'Room is full' });
-        
         const { playerWallet } = req.body;
         if (!isValidWallet(playerWallet)) return res.status(400).json({ error: 'Invalid wallet' });
         
         // Prevent same player joining twice
         if (room.players.some(p => p.wallet === playerWallet)) {
             return res.status(400).json({ error: 'You are already in this room' });
+        }
+        
+        // If room has 2 players but player 2 hasn't paid, replace them
+        if (room.players.length >= 2) {
+            const player2 = room.players[1];
+            if (player2 && !player2.paid) {
+                // Replace unpaid player 2 with new player
+                console.log(`Replacing unpaid player ${player2.name} with new player in room ${code}`);
+                room.players[1] = { id: 1, wallet: playerWallet, name: getUsername(playerWallet), color: 'black', paid: false };
+                res.json({ success: true, room: sanitizeRoom(room), myPlayerId: 1, myColor: 'black', replaced: true });
+                return;
+            }
+            return res.status(400).json({ error: 'Room is full' });
         }
         
         const newPlayer = { id: 1, wallet: playerWallet, name: getUsername(playerWallet), color: 'black', paid: false };
@@ -1050,6 +1061,53 @@ app.post('/api/rooms/:code/join', (req, res) => {
     } catch (e) {
         console.error('Join room error:', e.message);
         res.status(500).json({ error: 'Failed to join room' });
+    }
+});
+
+// Leave room (only if not paid yet)
+app.post('/api/rooms/:code/leave', (req, res) => {
+    try {
+        const code = req.params.code?.toUpperCase();
+        const room = rooms.get(code);
+        if (!room) return res.status(404).json({ error: 'Room not found' });
+        
+        const { playerWallet } = req.body;
+        if (!playerWallet) return res.status(400).json({ error: 'Missing wallet' });
+        
+        const playerIndex = room.players.findIndex(p => p.wallet === playerWallet);
+        if (playerIndex === -1) return res.status(400).json({ error: 'Not in this room' });
+        
+        const player = room.players[playerIndex];
+        
+        // Cannot leave if already paid
+        if (player.paid) {
+            return res.status(400).json({ error: 'Cannot leave after paying. Game must finish.' });
+        }
+        
+        // Cannot leave if game started
+        if (room.status === 'playing') {
+            return res.status(400).json({ error: 'Cannot leave during game' });
+        }
+        
+        // Remove player
+        if (playerIndex === 0) {
+            // Creator leaving - delete room entirely if no one paid
+            if (!room.players.some(p => p.paid)) {
+                rooms.delete(code);
+                console.log(`Room ${code} deleted - creator left without paying`);
+                return res.json({ success: true, roomDeleted: true });
+            }
+        } else {
+            // Player 2 leaving - just remove them
+            room.players.splice(playerIndex, 1);
+            room.status = 'waiting_players';
+            console.log(`Player left room ${code}: ${player.name}`);
+        }
+        
+        res.json({ success: true });
+    } catch (e) {
+        console.error('Leave room error:', e.message);
+        res.status(500).json({ error: 'Failed to leave room' });
     }
 });
 
