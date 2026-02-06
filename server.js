@@ -796,6 +796,18 @@ app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', walletAddress: WALLET_ADDRESS, rooms: rooms.size, token: TOKEN_SYMBOL });
 });
 
+app.get('/api/stats', (req, res) => {
+    const activeRooms = Array.from(rooms.values()).filter(r => r.status !== 'finished');
+    const playingRooms = activeRooms.filter(r => r.status === 'playing');
+    res.json({ 
+        success: true,
+        totalUsers: profiles.size,
+        totalMatches: matchHistory.length,
+        activeRooms: activeRooms.length,
+        liveGames: playingRooms.length
+    });
+});
+
 app.get('/api/blockhash', async (req, res) => {
     try {
         const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('finalized');
