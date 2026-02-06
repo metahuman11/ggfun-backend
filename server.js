@@ -819,13 +819,13 @@ app.get('/api/my-game/:wallet', (req, res) => {
     const wallet = req.params.wallet;
     if (!isValidWallet(wallet)) return res.status(400).json({ error: 'Invalid wallet' });
     
-    // Find active room where this player is playing AND has paid
+    // Find active room where this player is a participant (paid or unpaid)
     for (const [code, room] of rooms.entries()) {
         if (room.status === 'finished') continue;
         
         const player = room.players.find(p => p.wallet === wallet);
-        if (player && player.paid) {
-            // Only show rejoin if player has actually paid
+        if (player) {
+            // Allow rejoin for any active room the player is in
             return res.json({
                 success: true,
                 hasActiveGame: true,
