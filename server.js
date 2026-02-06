@@ -216,7 +216,7 @@ const WALLET_PRIVATE_KEY = process.env.WALLET_PRIVATE_KEY || '';
 
 // Custom Token Configuration
 const TOKEN_MINT = new PublicKey('BY31GbusfpHcG8idNvP5osfndSECCPrp6BxCr9Z5pump');
-const TOKEN_SYMBOL = '$TEST';
+const TOKEN_SYMBOL = '$GGFUN';
 const TOKEN_DECIMALS = 6; // Most pump.fun tokens have 6 decimals
 
 const COMMISSION_RATE = 0.10;
