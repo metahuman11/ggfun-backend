@@ -1,9 +1,9 @@
 /**
- * Chess Arena v6 - With Persistence
+ * Chess Arena v7 - With MongoDB Persistence
  * - Token based payments (same token amount for both players)
  * - Price fetched from Jupiter/DexScreener at room creation
  * - Security hardened
- * - JSON file persistence for data
+ * - MongoDB persistence (Railway-proof!)
  */
 const express = require('express');
 const cors = require('cors');
@@ -12,24 +12,61 @@ const path = require('path');
 const { Connection, PublicKey, Keypair, Transaction } = require('@solana/web3.js');
 const { getAssociatedTokenAddress, createTransferInstruction, TOKEN_2022_PROGRAM_ID } = require('@solana/spl-token');
 const bs58 = require('bs58');
+const { MongoClient } = require('mongodb');
 
 // ═══════════════════════════════════════════════════════════════
-// PERSISTENCE - Save/Load data to JSON files
+// PERSISTENCE - MongoDB (primary) or JSON files (fallback)
 // ═══════════════════════════════════════════════════════════════
+const MONGO_URI = process.env.MONGO_URI || process.env.MONGODB_URI;
 const DATA_DIR = process.env.DATA_DIR || './data';
 const DATA_FILE = path.join(DATA_DIR, 'chess_data.json');
 
-// Ensure data directory exists
+let mongoDb = null;
+let useMongoDb = false;
+
+// Initialize MongoDB connection
+async function initMongo() {
+    if (!MONGO_URI) {
+        console.log('⚠️ No MONGO_URI set - using JSON file storage (data may be lost on redeploy!)');
+        return false;
+    }
+    try {
+        const client = new MongoClient(MONGO_URI);
+        await client.connect();
+        mongoDb = client.db('ggfun');
+        console.log('✅ Connected to MongoDB - data is persistent!');
+        return true;
+    } catch (e) {
+        console.error('❌ MongoDB connection failed:', e.message);
+        return false;
+    }
+}
+
+// Ensure data directory exists for fallback
 if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
-function loadData() {
+async function loadData() {
+    // Try MongoDB first
+    if (mongoDb) {
+        try {
+            const doc = await mongoDb.collection('gamedata').findOne({ _id: 'main' });
+            if (doc) {
+                console.log('✅ Data loaded from MongoDB');
+                return doc.data;
+            }
+        } catch (e) {
+            console.error('MongoDB load error:', e.message);
+        }
+    }
+    
+    // Fallback to JSON file
     try {
         if (fs.existsSync(DATA_FILE)) {
             const raw = fs.readFileSync(DATA_FILE, 'utf8');
             const data = JSON.parse(raw);
-            console.log('✅ Data loaded from file');
+            console.log('✅ Data loaded from JSON file');
             return data;
         }
     } catch (e) {
@@ -38,19 +75,36 @@ function loadData() {
     return null;
 }
 
-function saveData() {
+async function saveData() {
+    const data = {
+        usernames: Object.fromEntries(usernames),
+        profiles: Object.fromEntries(profiles),
+        matchHistory: matchHistory.slice(0, 500), // Keep last 500 matches
+        xLinkedAccounts: Object.fromEntries(xLinkedAccounts),
+        followers: Object.fromEntries(Array.from(followers.entries()).map(([k, v]) => [k, Array.from(v)])),
+        following: Object.fromEntries(Array.from(following.entries()).map(([k, v]) => [k, Array.from(v)])),
+        savedAt: Date.now()
+    };
+    
+    // Save to MongoDB if available
+    if (mongoDb) {
+        try {
+            await mongoDb.collection('gamedata').updateOne(
+                { _id: 'main' },
+                { $set: { data, updatedAt: new Date() } },
+                { upsert: true }
+            );
+            console.log('💾 Data saved to MongoDB');
+            return;
+        } catch (e) {
+            console.error('MongoDB save error:', e.message);
+        }
+    }
+    
+    // Fallback to JSON file
     try {
-        const data = {
-            usernames: Object.fromEntries(usernames),
-            profiles: Object.fromEntries(profiles),
-            matchHistory: matchHistory.slice(0, 500), // Keep last 500 matches
-            xLinkedAccounts: Object.fromEntries(xLinkedAccounts),
-            followers: Object.fromEntries(Array.from(followers.entries()).map(([k, v]) => [k, Array.from(v)])),
-            following: Object.fromEntries(Array.from(following.entries()).map(([k, v]) => [k, Array.from(v)])),
-            savedAt: Date.now()
-        };
         fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
-        console.log('💾 Data saved to file');
+        console.log('💾 Data saved to JSON file');
     } catch (e) {
         console.error('Error saving data:', e.message);
     }
@@ -60,8 +114,8 @@ function saveData() {
 setInterval(saveData, 2 * 60 * 1000);
 
 // Save on exit
-process.on('SIGTERM', () => { saveData(); process.exit(0); });
-process.on('SIGINT', () => { saveData(); process.exit(0); });
+process.on('SIGTERM', async () => { await saveData(); process.exit(0); });
+process.on('SIGINT', async () => { await saveData(); process.exit(0); });
 
 const app = express();
 
@@ -187,16 +241,33 @@ const rooms = new Map();
 const processedTx = new Set();
 const xVerifications = new Map(); // wallet -> { code, createdAt, xHandle }
 
-// Load saved data or create empty structures
-const savedData = loadData();
-const usernames = new Map(savedData?.usernames ? Object.entries(savedData.usernames) : []);
-const profiles = new Map(savedData?.profiles ? Object.entries(savedData.profiles) : []);
-const matchHistory = savedData?.matchHistory || [];
-const xLinkedAccounts = new Map(savedData?.xLinkedAccounts ? Object.entries(savedData.xLinkedAccounts) : []);
-const followers = new Map(savedData?.followers ? Object.entries(savedData.followers).map(([k, v]) => [k, new Set(v)]) : []);
-const following = new Map(savedData?.following ? Object.entries(savedData.following).map(([k, v]) => [k, new Set(v)]) : []);
+// Data structures (will be populated on startup)
+let usernames = new Map();
+let profiles = new Map();
+let matchHistory = [];
+let xLinkedAccounts = new Map();
+let followers = new Map();
+let following = new Map();
 
-console.log(`📊 Loaded: ${usernames.size} users, ${profiles.size} profiles, ${matchHistory.length} matches`);
+// Async startup function
+async function startup() {
+    // Initialize MongoDB first
+    useMongoDb = await initMongo();
+    
+    // Load saved data
+    const savedData = await loadData();
+    
+    if (savedData) {
+        usernames = new Map(savedData.usernames ? Object.entries(savedData.usernames) : []);
+        profiles = new Map(savedData.profiles ? Object.entries(savedData.profiles) : []);
+        matchHistory = savedData.matchHistory || [];
+        xLinkedAccounts = new Map(savedData.xLinkedAccounts ? Object.entries(savedData.xLinkedAccounts) : []);
+        followers = new Map(savedData.followers ? Object.entries(savedData.followers).map(([k, v]) => [k, new Set(v)]) : []);
+        following = new Map(savedData.following ? Object.entries(savedData.following).map(([k, v]) => [k, new Set(v)]) : []);
+    }
+    
+    console.log(`📊 Loaded: ${usernames.size} users, ${profiles.size} profiles, ${matchHistory.length} matches`);
+}
 
 let cachedTokenPrice = null;
 let priceLastFetch = 0;
@@ -1271,4 +1342,7 @@ async function handlePayout(room) {
     }
 }
 
-app.listen(PORT, () => console.log(`Chess Arena v5 (${TOKEN_SYMBOL}) on port ${PORT}`));
+// Start server after initializing data
+startup().then(() => {
+    app.listen(PORT, () => console.log(`Chess Arena v7 (${TOKEN_SYMBOL}) on port ${PORT} - MongoDB: ${useMongoDb ? 'YES ✅' : 'NO ⚠️'}`));
+});
