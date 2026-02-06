@@ -976,23 +976,33 @@ app.post('/api/rooms', async (req, res) => {
 });
 
 app.post('/api/rooms/:code/join', (req, res) => {
-    const room = rooms.get(req.params.code.toUpperCase());
-    if (!room) return res.status(404).json({ error: 'Not found' });
-    if (room.players.length >= 2) return res.status(400).json({ error: 'Full' });
-    
-    const { playerWallet } = req.body;
-    if (!isValidWallet(playerWallet)) return res.status(400).json({ error: 'Invalid wallet' });
-    
-    // Prevent same player joining twice
-    if (room.players.some(p => p.wallet === playerWallet)) {
-        return res.status(400).json({ error: 'Already in room' });
+    try {
+        const code = req.params.code?.toUpperCase();
+        if (!code) return res.status(400).json({ error: 'Invalid room code' });
+        
+        const room = rooms.get(code);
+        if (!room) return res.status(404).json({ error: 'Room not found' });
+        if (room.status === 'finished') return res.status(400).json({ error: 'Game already finished' });
+        if (room.status === 'playing') return res.status(400).json({ error: 'Game already started' });
+        if (!room.players || room.players.length >= 2) return res.status(400).json({ error: 'Room is full' });
+        
+        const { playerWallet } = req.body;
+        if (!isValidWallet(playerWallet)) return res.status(400).json({ error: 'Invalid wallet' });
+        
+        // Prevent same player joining twice
+        if (room.players.some(p => p.wallet === playerWallet)) {
+            return res.status(400).json({ error: 'You are already in this room' });
+        }
+        
+        const newPlayer = { id: 1, wallet: playerWallet, name: getUsername(playerWallet), color: 'black', paid: false };
+        room.players.push(newPlayer);
+        room.status = 'waiting_payments';
+        console.log('Player joined:', room.code, 'as', newPlayer.color);
+        res.json({ success: true, room: sanitizeRoom(room), myPlayerId: newPlayer.id, myColor: newPlayer.color });
+    } catch (e) {
+        console.error('Join room error:', e.message);
+        res.status(500).json({ error: 'Failed to join room' });
     }
-    
-    const newPlayer = { id: 1, wallet: playerWallet, name: getUsername(playerWallet), color: 'black', paid: false };
-    room.players.push(newPlayer);
-    room.status = 'waiting_payments';
-    console.log('Player joined:', room.code, 'as', newPlayer.color);
-    res.json({ success: true, room: sanitizeRoom(room), myPlayerId: newPlayer.id, myColor: newPlayer.color });
 });
 
 app.post('/api/rooms/:code/spectate', (req, res) => {
@@ -1303,20 +1313,28 @@ function sanitizeRoom(room) {
 // PAYMENT VERIFICATION
 // ═══════════════════════════════════════════════════════════════
 app.post('/api/payments/verify', async (req, res) => {
-    const { roomCode, txSignature, playerWallet } = req.body;
-    const room = rooms.get(roomCode.toUpperCase());
-    if (!room) return res.status(404).json({ error: 'Not found' });
-    if (room.status === 'finished') return res.status(400).json({ error: 'Game finished' });
-    if (room.status === 'playing') return res.status(400).json({ error: 'Game started' });
-    if (processedTx.has(txSignature)) return res.status(400).json({ error: 'Already processed' });
-    
-    // Check if this wallet already paid in this room (prevent self-play)
-    const alreadyPaid = room.players.find(p => p.wallet === playerWallet && p.paid);
-    if (alreadyPaid) {
-        return res.status(400).json({ error: 'You already paid for this room. Cannot play against yourself!' });
-    }
-    
     try {
+        const { roomCode, txSignature, playerWallet } = req.body;
+        
+        // Validate inputs
+        if (!roomCode || !txSignature || !playerWallet) {
+            return res.status(400).json({ error: 'Missing required fields' });
+        }
+        if (!isValidWallet(playerWallet)) {
+            return res.status(400).json({ error: 'Invalid wallet address' });
+        }
+        
+        const room = rooms.get(roomCode.toUpperCase());
+        if (!room) return res.status(404).json({ error: 'Room not found' });
+        if (room.status === 'finished') return res.status(400).json({ error: 'Game already finished' });
+        if (room.status === 'playing') return res.status(400).json({ error: 'Game already started' });
+        if (processedTx.has(txSignature)) return res.status(400).json({ error: 'Transaction already processed' });
+        
+        // Check if this wallet already paid in this room (prevent self-play)
+        const alreadyPaid = room.players?.find(p => p.wallet === playerWallet && p.paid);
+        if (alreadyPaid) {
+            return res.status(400).json({ error: 'You already paid for this room. Cannot play against yourself!' });
+        }
         const tx = await connection.getTransaction(txSignature, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' });
         if (!tx) return res.status(400).json({ error: 'TX not found' });
         if (tx.meta?.err) return res.status(400).json({ error: 'TX failed' });
@@ -1357,20 +1375,31 @@ app.post('/api/payments/verify', async (req, res) => {
 // MOVE
 // ═══════════════════════════════════════════════════════════════
 app.post('/api/rooms/:code/move', (req, res) => {
-    const { playerId, from, to } = req.body;
-    const room = rooms.get(req.params.code.toUpperCase());
-    if (!room) return res.status(404).json({ error: 'Not found' });
-    if (room.status !== 'playing') return res.status(400).json({ error: 'Not playing' });
-    if (room.winner !== null) return res.status(400).json({ error: 'Game over' });
-    
-    updateTimer(room);
-    if (room.winner !== null) {
-        return res.json({ success: true, board: room.board, gameOver: true, winner: room.winner, timeout: true });
-    }
-    
-    const player = room.players[playerId];
-    if (!player) return res.status(400).json({ error: 'Invalid player' });
-    if (player.color !== room.currentTurn) return res.status(400).json({ error: 'Not your turn' });
+    try {
+        const { playerId, from, to } = req.body;
+        
+        // Validate inputs
+        if (playerId === undefined || playerId === null) return res.status(400).json({ error: 'Missing player ID' });
+        if (!from || from.row === undefined || from.col === undefined) return res.status(400).json({ error: 'Invalid from position' });
+        if (!to || to.row === undefined || to.col === undefined) return res.status(400).json({ error: 'Invalid to position' });
+        if (from.row < 0 || from.row > 7 || from.col < 0 || from.col > 7) return res.status(400).json({ error: 'From position out of bounds' });
+        if (to.row < 0 || to.row > 7 || to.col < 0 || to.col > 7) return res.status(400).json({ error: 'To position out of bounds' });
+        
+        const code = req.params.code?.toUpperCase();
+        const room = rooms.get(code);
+        if (!room) return res.status(404).json({ error: 'Room not found' });
+        if (room.status !== 'playing') return res.status(400).json({ error: 'Game not in progress' });
+        if (room.winner !== null) return res.status(400).json({ error: 'Game already over' });
+        if (!room.board) return res.status(500).json({ error: 'Invalid game state' });
+        
+        updateTimer(room);
+        if (room.winner !== null) {
+            return res.json({ success: true, board: room.board, gameOver: true, winner: room.winner, timeout: true });
+        }
+        
+        const player = room.players?.[playerId];
+        if (!player) return res.status(400).json({ error: 'Invalid player' });
+        if (player.color !== room.currentTurn) return res.status(400).json({ error: 'Not your turn' });
     
     const piece = room.board[from.row][from.col];
     if (!piece) return res.status(400).json({ error: 'No piece' });
@@ -1402,6 +1431,10 @@ app.post('/api/rooms/:code/move', (req, res) => {
         success: true, board: room.board, currentTurn: room.currentTurn, lastMove: room.lastMove,
         whiteTimeMs: room.whiteTimeMs, blackTimeMs: room.blackTimeMs
     });
+    } catch (e) {
+        console.error('Move error:', e.message);
+        res.status(500).json({ error: 'Failed to process move' });
+    }
 });
 
 // ═══════════════════════════════════════════════════════════════
@@ -1464,6 +1497,21 @@ async function handlePayout(room) {
         return null;
     }
 }
+
+// Global error handler
+app.use((err, req, res, next) => {
+    console.error('Unhandled error:', err.message);
+    res.status(500).json({ error: 'Internal server error' });
+});
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (err) => {
+    console.error('Uncaught Exception:', err.message);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection:', reason);
+});
 
 // Start server after initializing data
 startup().then(() => {
