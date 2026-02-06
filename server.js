@@ -743,16 +743,18 @@ app.get('/api/balance/:wallet', async (req, res) => {
 });
 
 // Check if player has active game (for reconnection)
+// Only returns hasActiveGame: true if the player has PAID
 app.get('/api/my-game/:wallet', (req, res) => {
     const wallet = req.params.wallet;
     if (!isValidWallet(wallet)) return res.status(400).json({ error: 'Invalid wallet' });
     
-    // Find active room where this player is playing
+    // Find active room where this player is playing AND has paid
     for (const [code, room] of rooms.entries()) {
         if (room.status === 'finished') continue;
         
         const player = room.players.find(p => p.wallet === wallet);
-        if (player) {
+        if (player && player.paid) {
+            // Only show rejoin if player has actually paid
             return res.json({
                 success: true,
                 hasActiveGame: true,
@@ -763,6 +765,8 @@ app.get('/api/my-game/:wallet', (req, res) => {
                     myPlayerId: player.id,
                     entryFeeUsd: room.entryFeeUsd,
                     tokenAmount: room.tokenAmount,
+                    createdAt: room.createdAt,
+                    hasPaid: player.paid,
                     opponent: room.players.find(p => p.wallet !== wallet)?.name || 'Waiting...'
                 }
             });
