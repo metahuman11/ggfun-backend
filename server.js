@@ -861,7 +861,7 @@ app.post('/api/rooms', async (req, res) => {
     };
     rooms.set(code, room);
     console.log(`Room created: ${code} - ${tokenAmount} ${TOKEN_SYMBOL} (~$${usdAmount})`);
-    res.json({ success: true, room: sanitizeRoom(room) });
+    res.json({ success: true, room: sanitizeRoom(room), myPlayerId: 0, myColor: 'white' });
 });
 
 app.post('/api/rooms/:code/join', (req, res) => {
@@ -877,10 +877,11 @@ app.post('/api/rooms/:code/join', (req, res) => {
         return res.status(400).json({ error: 'Already in room' });
     }
     
-    room.players.push({ id: 1, wallet: playerWallet, name: getUsername(playerWallet), color: 'black', paid: false });
+    const newPlayer = { id: 1, wallet: playerWallet, name: getUsername(playerWallet), color: 'black', paid: false };
+    room.players.push(newPlayer);
     room.status = 'waiting_payments';
-    console.log('Player joined:', room.code);
-    res.json({ success: true, room: sanitizeRoom(room) });
+    console.log('Player joined:', room.code, 'as', newPlayer.color);
+    res.json({ success: true, room: sanitizeRoom(room), myPlayerId: newPlayer.id, myColor: newPlayer.color });
 });
 
 app.post('/api/rooms/:code/spectate', (req, res) => {
