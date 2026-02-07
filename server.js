@@ -120,7 +120,7 @@ process.on('SIGINT', async () => { await saveData(); process.exit(0); });
 // ═══════════════════════════════════════════════════════════════
 // TELEGRAM NOTIFICATIONS
 // ═══════════════════════════════════════════════════════════════
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8366770253:AAEugTrgEE2YnXIftShfwKYT8vGlwddN-Bg';
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || ''; // Disabled
 const TELEGRAM_GROUP_ID = process.env.TELEGRAM_GROUP_ID || '-1003559502036';
 
 async function sendTelegramNotification(message) {
