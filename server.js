@@ -1962,6 +1962,283 @@ app.get('/api/ttt/rooms', (req, res) => {
     res.json({ success: true, rooms: activeRooms });
 });
 
+// ═══════════════════════════════════════════════════════════════
+// BATTLESHIP GAME (Amiral Battı)
+// ═══════════════════════════════════════════════════════════════
+const battleshipRooms = new Map();
+
+const SHIPS = [
+    { name: 'Carrier', size: 5 },
+    { name: 'Battleship', size: 4 },
+    { name: 'Cruiser', size: 3 },
+    { name: 'Submarine', size: 3 },
+    { name: 'Destroyer', size: 2 }
+];
+
+function createEmptyGrid() {
+    return Array(10).fill(null).map(() => Array(10).fill(null));
+}
+
+function isValidPlacement(grid, ship, row, col, horizontal) {
+    for (let i = 0; i < ship.size; i++) {
+        const r = horizontal ? row : row + i;
+        const c = horizontal ? col + i : col;
+        if (r < 0 || r >= 10 || c < 0 || c >= 10) return false;
+        if (grid[r][c]) return false;
+    }
+    return true;
+}
+
+function placeShip(grid, ship, row, col, horizontal) {
+    for (let i = 0; i < ship.size; i++) {
+        const r = horizontal ? row : row + i;
+        const c = horizontal ? col + i : col;
+        grid[r][c] = ship.name;
+    }
+}
+
+function checkAllShipsSunk(grid, shots) {
+    for (let r = 0; r < 10; r++) {
+        for (let c = 0; c < 10; c++) {
+            if (grid[r][c] && !shots[r][c]) return false;
+        }
+    }
+    return true;
+}
+
+// Create Battleship Room
+app.post('/api/battleship/rooms', async (req, res) => {
+    const { entryFeeUsd, creatorWallet } = req.body;
+    const code = genCode();
+    
+    const tokenPrice = await getTokenPrice();
+    const usdAmount = parseFloat(entryFeeUsd) || 0;
+    const isFreeGame = usdAmount === 0;
+    const tokenAmount = isFreeGame ? 0 : Math.floor(usdAmount / tokenPrice);
+    
+    const room = {
+        code,
+        gameType: 'battleship',
+        createdAt: Date.now(),
+        entryFeeUsd: usdAmount,
+        tokenAmount: tokenAmount,
+        isFreeGame: isFreeGame,
+        status: 'waiting_players',
+        currentTurn: 0,
+        winner: null,
+        players: [{
+            id: 0,
+            wallet: creatorWallet,
+            name: getUsername(creatorWallet),
+            paid: isFreeGame,
+            grid: createEmptyGrid(),
+            shots: createEmptyGrid(),
+            shipsPlaced: false
+        }],
+        spectators: [],
+        chat: []
+    };
+    
+    battleshipRooms.set(code, room);
+    console.log(`Battleship Room created: ${code} - ${isFreeGame ? 'FREE' : tokenAmount + ' ' + TOKEN_SYMBOL}`);
+    
+    // Telegram notification
+    const creatorName = getUsername(creatorWallet) || 'Anonymous';
+    const roomLink = `https://ggfun.lol/battleship.html?room=${code}`;
+    const telegramMsg = isFreeGame 
+        ? `🚢 <b>New Battleship Room!</b>\n\n🆓 Entry: <b>FREE</b>\n👤 Creator: ${creatorName}\n🎯 Room: <code>${code}</code>\n\n🔗 ${roomLink}`
+        : `🚢 <b>New Battleship Room!</b>\n\n💰 Entry: <b>${tokenAmount.toLocaleString()} $GGFUN</b> (~$${usdAmount})\n👤 Creator: ${creatorName}\n🎯 Room: <code>${code}</code>\n\n🔗 ${roomLink}`;
+    sendTelegramNotification(telegramMsg);
+    
+    res.json({ success: true, room: sanitizeBattleshipRoom(room, 0), myPlayerId: 0 });
+});
+
+// Sanitize room (hide opponent's ships)
+function sanitizeBattleshipRoom(room, viewerId) {
+    return {
+        code: room.code,
+        gameType: room.gameType,
+        status: room.status,
+        entryFeeUsd: room.entryFeeUsd,
+        tokenAmount: room.tokenAmount,
+        isFreeGame: room.isFreeGame,
+        currentTurn: room.currentTurn,
+        winner: room.winner,
+        createdAt: room.createdAt,
+        players: room.players.map((p, idx) => ({
+            id: p.id,
+            name: p.name,
+            paid: p.paid,
+            shipsPlaced: p.shipsPlaced,
+            // Only show own grid, hide opponent's
+            grid: idx === viewerId ? p.grid : null,
+            shots: p.shots
+        }))
+    };
+}
+
+// Join Battleship Room
+app.post('/api/battleship/rooms/:code/join', (req, res) => {
+    const code = req.params.code?.toUpperCase();
+    const room = battleshipRooms.get(code);
+    if (!room) return res.status(404).json({ error: 'Room not found' });
+    if (room.status === 'finished') return res.status(400).json({ error: 'Game finished' });
+    if (room.players.length >= 2) return res.status(400).json({ error: 'Room full' });
+    
+    const { playerWallet } = req.body;
+    if (room.players.some(p => p.wallet === playerWallet)) {
+        return res.status(400).json({ error: 'Already in room' });
+    }
+    
+    const newPlayer = {
+        id: 1,
+        wallet: playerWallet,
+        name: getUsername(playerWallet),
+        paid: room.isFreeGame,
+        grid: createEmptyGrid(),
+        shots: createEmptyGrid(),
+        shipsPlaced: false
+    };
+    room.players.push(newPlayer);
+    room.status = room.isFreeGame ? 'placing_ships' : 'waiting_payments';
+    
+    res.json({ success: true, room: sanitizeBattleshipRoom(room, 1), myPlayerId: 1 });
+});
+
+// Place Ships
+app.post('/api/battleship/rooms/:code/place-ships', (req, res) => {
+    const code = req.params.code?.toUpperCase();
+    const room = battleshipRooms.get(code);
+    if (!room) return res.status(404).json({ error: 'Room not found' });
+    
+    const { playerId, ships } = req.body;
+    // ships = [{ name, row, col, horizontal }, ...]
+    
+    const player = room.players[playerId];
+    if (!player) return res.status(400).json({ error: 'Invalid player' });
+    if (player.shipsPlaced) return res.status(400).json({ error: 'Ships already placed' });
+    
+    // Validate and place ships
+    const grid = createEmptyGrid();
+    for (const shipPlacement of ships) {
+        const shipDef = SHIPS.find(s => s.name === shipPlacement.name);
+        if (!shipDef) return res.status(400).json({ error: 'Invalid ship: ' + shipPlacement.name });
+        if (!isValidPlacement(grid, shipDef, shipPlacement.row, shipPlacement.col, shipPlacement.horizontal)) {
+            return res.status(400).json({ error: 'Invalid placement for ' + shipPlacement.name });
+        }
+        placeShip(grid, shipDef, shipPlacement.row, shipPlacement.col, shipPlacement.horizontal);
+    }
+    
+    player.grid = grid;
+    player.shipsPlaced = true;
+    
+    // Check if both players placed ships
+    if (room.players.length === 2 && room.players.every(p => p.shipsPlaced)) {
+        room.status = 'playing';
+        room.currentTurn = 0;
+    }
+    
+    res.json({ success: true, room: sanitizeBattleshipRoom(room, playerId) });
+});
+
+// Fire shot
+app.post('/api/battleship/rooms/:code/fire', (req, res) => {
+    const code = req.params.code?.toUpperCase();
+    const room = battleshipRooms.get(code);
+    if (!room) return res.status(404).json({ error: 'Room not found' });
+    if (room.status !== 'playing') return res.status(400).json({ error: 'Game not in progress' });
+    
+    const { playerId, row, col } = req.body;
+    if (room.currentTurn !== playerId) return res.status(400).json({ error: 'Not your turn' });
+    if (row < 0 || row >= 10 || col < 0 || col >= 10) return res.status(400).json({ error: 'Invalid coordinates' });
+    
+    const player = room.players[playerId];
+    const opponent = room.players[playerId === 0 ? 1 : 0];
+    
+    if (player.shots[row][col]) return res.status(400).json({ error: 'Already fired there' });
+    
+    // Check hit or miss
+    const hit = opponent.grid[row][col] !== null;
+    player.shots[row][col] = hit ? 'hit' : 'miss';
+    
+    // Check if ship sunk
+    let sunkShip = null;
+    if (hit) {
+        const shipName = opponent.grid[row][col];
+        const shipDef = SHIPS.find(s => s.name === shipName);
+        let shipHits = 0;
+        for (let r = 0; r < 10; r++) {
+            for (let c = 0; c < 10; c++) {
+                if (opponent.grid[r][c] === shipName && player.shots[r][c] === 'hit') {
+                    shipHits++;
+                }
+            }
+        }
+        if (shipHits === shipDef.size) {
+            sunkShip = shipName;
+        }
+    }
+    
+    // Check win
+    if (checkAllShipsSunk(opponent.grid, player.shots)) {
+        room.status = 'finished';
+        room.winner = playerId;
+        room.finishedAt = Date.now();
+        if (!room.isFreeGame) handlePayout(room);
+        return res.json({ 
+            success: true, 
+            hit, 
+            sunkShip, 
+            gameOver: true, 
+            winner: playerId,
+            room: sanitizeBattleshipRoom(room, playerId)
+        });
+    }
+    
+    // Switch turn
+    room.currentTurn = playerId === 0 ? 1 : 0;
+    
+    res.json({ 
+        success: true, 
+        hit, 
+        sunkShip,
+        currentTurn: room.currentTurn,
+        room: sanitizeBattleshipRoom(room, playerId)
+    });
+});
+
+// Get Battleship Room
+app.get('/api/battleship/rooms/:code', (req, res) => {
+    const room = battleshipRooms.get(req.params.code?.toUpperCase());
+    if (!room) return res.status(404).json({ error: 'Room not found' });
+    
+    const viewerId = parseInt(req.query.playerId) || 0;
+    res.json({ success: true, room: sanitizeBattleshipRoom(room, viewerId) });
+});
+
+// List Battleship Rooms
+app.get('/api/battleship/rooms', (req, res) => {
+    const activeRooms = [];
+    for (const [code, room] of battleshipRooms) {
+        if (room.status !== 'finished' || Date.now() - room.createdAt < 300000) {
+            const showRoom = room.isFreeGame || room.players.some(p => p.paid);
+            if (showRoom) {
+                activeRooms.push({
+                    code: room.code,
+                    status: room.status,
+                    entryFeeUsd: room.entryFeeUsd,
+                    tokenAmount: room.tokenAmount,
+                    isFreeGame: room.isFreeGame,
+                    playerCount: room.players.length,
+                    players: room.players.map(p => ({ name: p.name, shipsPlaced: p.shipsPlaced })),
+                    createdAt: room.createdAt
+                });
+            }
+        }
+    }
+    res.json({ success: true, rooms: activeRooms });
+});
+
 // Global error handler
 app.use((err, req, res, next) => {
     console.error('Unhandled error:', err.message);
