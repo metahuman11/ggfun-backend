@@ -1,9 +1,9 @@
 /**
- * Chess Arena v7 - With MongoDB Persistence
- * - Token based payments (same token amount for both players)
- * - Price fetched from Jupiter/DexScreener at room creation
- * - Security hardened
- * - MongoDB persistence (Railway-proof!)
+ * GG Fun Arena v8 - Multi-Game Platform
+ * - Chess + Tic-Tac-Toe
+ * - Token based payments ($GGFUN)
+ * - Free play mode
+ * - MongoDB persistence
  */
 const express = require('express');
 const cors = require('cors');
@@ -1791,6 +1791,176 @@ async function handlePayout(room) {
         return null;
     }
 }
+
+// ═══════════════════════════════════════════════════════════════
+// TIC-TAC-TOE GAME
+// ═══════════════════════════════════════════════════════════════
+const tttRooms = new Map();
+
+function checkTTTWinner(board) {
+    const lines = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+    for (const [a,b,c] of lines) {
+        if (board[a] && board[a] === board[b] && board[a] === board[c]) return board[a];
+    }
+    if (board.every(cell => cell)) return 'draw';
+    return null;
+}
+
+// Create TTT Room
+app.post('/api/ttt/rooms', async (req, res) => {
+    const { entryFeeUsd, creatorWallet } = req.body;
+    const code = genCode();
+    
+    const tokenPrice = await getTokenPrice();
+    const usdAmount = parseFloat(entryFeeUsd) || 0;
+    const isFreeGame = usdAmount === 0;
+    const tokenAmount = isFreeGame ? 0 : Math.floor(usdAmount / tokenPrice);
+    
+    const room = {
+        code,
+        gameType: 'tictactoe',
+        createdAt: Date.now(),
+        entryFeeUsd: usdAmount,
+        tokenAmount: tokenAmount,
+        isFreeGame: isFreeGame,
+        status: 'waiting_players',
+        board: Array(9).fill(null),
+        currentTurn: 'X',
+        winner: null,
+        players: [{ id: 0, wallet: creatorWallet, name: getUsername(creatorWallet), symbol: 'X', paid: isFreeGame }],
+        spectators: [],
+        chat: []
+    };
+    
+    tttRooms.set(code, room);
+    console.log(`TTT Room created: ${code} - ${isFreeGame ? 'FREE' : tokenAmount + ' ' + TOKEN_SYMBOL}`);
+    
+    // Telegram notification
+    const creatorName = getUsername(creatorWallet) || 'Anonymous';
+    const roomLink = `https://ggfun.lol/ttt?room=${code}`;
+    const telegramMsg = isFreeGame 
+        ? `🎮 <b>New Tic-Tac-Toe Room!</b>\n\n🆓 Entry: <b>FREE</b>\n👤 Creator: ${creatorName}\n🎯 Room: <code>${code}</code>\n\n🔗 ${roomLink}`
+        : `🎮 <b>New Tic-Tac-Toe Room!</b>\n\n💰 Entry: <b>${tokenAmount.toLocaleString()} $GGFUN</b> (~$${usdAmount})\n👤 Creator: ${creatorName}\n🎯 Room: <code>${code}</code>\n\n🔗 ${roomLink}`;
+    sendTelegramNotification(telegramMsg);
+    
+    res.json({ success: true, room, myPlayerId: 0, mySymbol: 'X' });
+});
+
+// Join TTT Room
+app.post('/api/ttt/rooms/:code/join', (req, res) => {
+    const code = req.params.code?.toUpperCase();
+    const room = tttRooms.get(code);
+    if (!room) return res.status(404).json({ error: 'Room not found' });
+    if (room.status === 'finished') return res.status(400).json({ error: 'Game finished' });
+    if (room.players.length >= 2) return res.status(400).json({ error: 'Room full' });
+    
+    const { playerWallet } = req.body;
+    if (room.players.some(p => p.wallet === playerWallet)) {
+        return res.status(400).json({ error: 'Already in room' });
+    }
+    
+    const newPlayer = { id: 1, wallet: playerWallet, name: getUsername(playerWallet), symbol: 'O', paid: room.isFreeGame };
+    room.players.push(newPlayer);
+    
+    if (room.isFreeGame) {
+        room.status = 'playing';
+    } else {
+        room.status = 'waiting_payments';
+    }
+    
+    res.json({ success: true, room, myPlayerId: 1, mySymbol: 'O' });
+});
+
+// Get TTT Room
+app.get('/api/ttt/rooms/:code', (req, res) => {
+    const room = tttRooms.get(req.params.code?.toUpperCase());
+    if (!room) return res.status(404).json({ error: 'Room not found' });
+    res.json({ success: true, room });
+});
+
+// TTT Move
+app.post('/api/ttt/rooms/:code/move', (req, res) => {
+    const code = req.params.code?.toUpperCase();
+    const room = tttRooms.get(code);
+    if (!room) return res.status(404).json({ error: 'Room not found' });
+    if (room.status !== 'playing') return res.status(400).json({ error: 'Game not started' });
+    
+    const { playerId, position } = req.body;
+    if (position < 0 || position > 8) return res.status(400).json({ error: 'Invalid position' });
+    if (room.board[position]) return res.status(400).json({ error: 'Cell occupied' });
+    
+    const player = room.players[playerId];
+    if (!player) return res.status(400).json({ error: 'Invalid player' });
+    if (room.currentTurn !== player.symbol) return res.status(400).json({ error: 'Not your turn' });
+    
+    room.board[position] = player.symbol;
+    const result = checkTTTWinner(room.board);
+    
+    if (result) {
+        room.status = 'finished';
+        room.finishedAt = Date.now();
+        if (result === 'draw') {
+            room.winner = 'draw';
+            room.isDraw = true;
+            if (!room.isFreeGame) handleDrawPayout(room);
+        } else {
+            room.winner = playerId;
+            if (!room.isFreeGame) handlePayout(room);
+        }
+        return res.json({ success: true, board: room.board, gameOver: true, winner: room.winner, isDraw: result === 'draw' });
+    }
+    
+    room.currentTurn = room.currentTurn === 'X' ? 'O' : 'X';
+    res.json({ success: true, board: room.board, currentTurn: room.currentTurn });
+});
+
+// TTT Payment Verify
+app.post('/api/ttt/payments/verify', async (req, res) => {
+    const { roomCode, signature, playerWallet } = req.body;
+    const room = tttRooms.get(roomCode?.toUpperCase());
+    if (!room) return res.status(404).json({ error: 'Room not found' });
+    
+    try {
+        const tx = await connection.getParsedTransaction(signature, { commitment: 'confirmed', maxSupportedTransactionVersion: 0 });
+        if (!tx) return res.status(400).json({ error: 'Transaction not found' });
+        
+        const player = room.players.find(p => p.wallet === playerWallet);
+        if (!player) return res.status(400).json({ error: 'Player not in room' });
+        
+        player.paid = true;
+        
+        if (room.players.length === 2 && room.players.every(p => p.paid)) {
+            room.status = 'playing';
+        }
+        
+        res.json({ success: true, room, gameStarted: room.status === 'playing' });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// List TTT Rooms
+app.get('/api/ttt/rooms', (req, res) => {
+    const activeRooms = [];
+    for (const [code, room] of tttRooms) {
+        if (room.status !== 'finished' || Date.now() - room.createdAt < 300000) {
+            const showRoom = room.isFreeGame || room.players.some(p => p.paid);
+            if (showRoom) {
+                activeRooms.push({
+                    code: room.code,
+                    status: room.status,
+                    entryFeeUsd: room.entryFeeUsd,
+                    tokenAmount: room.tokenAmount,
+                    isFreeGame: room.isFreeGame,
+                    playerCount: room.players.length,
+                    players: room.players.map(p => ({ name: p.name, symbol: p.symbol })),
+                    createdAt: room.createdAt
+                });
+            }
+        }
+    }
+    res.json({ success: true, rooms: activeRooms });
+});
 
 // Global error handler
 app.use((err, req, res, next) => {
